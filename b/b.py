@@ -128,7 +128,9 @@ if __name__ == "__main__":
     print("="*40)
     print(f" Execution Time   : {duration_str}")
     print(f" Peak Memory Usage: {max_mem_record.value:.1f} %")
-    print(f" Final Used Memory: {final_mem.used / (1024**3):.1f} / {final_mem.total / (1024**3):.1f} GB")
+# ピーク時の使用率から、GB換算値を逆算して表示（あくまで目安ですが、見た目は整合します）
+    peak_gb = (final_mem.total * (max_mem_record.value / 100)) / (1024**3)
+    print(f" Peak Memory GB   : {peak_gb:.1f} / {final_mem.total / (1024**3):.1f} GB")
     print(f" Total Items Saved: {total_items.value:,} items")
     print(f" Resets (Avoided inf): {scale_counts.value:,} times") # 回避回数を表示
     if duration > 0:
