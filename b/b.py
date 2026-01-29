@@ -4,6 +4,7 @@ import psutil
 import os
 import datetime
 import ctypes
+import sys
 
 # ==========================================
 # 設定
@@ -11,47 +12,64 @@ import ctypes
 MEMORY_LIMIT_PERCENT = 95   # 目標メモリ使用率 (%)
 CHECK_INTERVAL = 0.5        # 監視更新間隔 (秒)
 BATCH_SIZE = 50000          # まとめて処理する回数
-THRESHOLD = 1e300           # これを超えたら桁落としする（inf回避）
-SCALE_FACTOR = 1e-150       # 桁落とし倍率（10の150乗分の1にする）
+THRESHOLD = 1e300           # inf回避の閾値
+SCALE_FACTOR = 1e-150       # 桁落とし倍率
 # ==========================================
 
-def memory_monitor(stop_event, start_time, max_mem_record):
+def memory_monitor(stop_event, start_time, max_mem_record, max_cpu_record):
     """
-    メモリ監視プロセス
+    メモリとCPUを監視するプロセス
     """
     print(f"Monitor: 監視開始 (目標: {MEMORY_LIMIT_PERCENT}%)")
-    total_mem_gb = psutil.virtual_memory().total / (1024**3)
+    
+    total_mem = psutil.virtual_memory().total
+    total_mem_gb = total_mem / (1024**3)
+    
+    # CPU測定の初期化（最初の呼び出しは0や不正確な値を返すため捨てます）
+    psutil.cpu_percent(interval=None)
     
     while not stop_event.is_set():
         try:
+            # intervalを指定することで、その間の平均CPU使用率を取得しつつsleep代わりになる
+            # これにより正確なCPU負荷が測定できます
+            cpu_percent = psutil.cpu_percent(interval=CHECK_INTERVAL)
+            
+            # メモリ情報の取得
             mem = psutil.virtual_memory()
-            usage_percent = mem.percent
+            mem_percent = mem.percent
             used_gb = mem.used / (1024**3)
             
-            if usage_percent > max_mem_record.value:
-                max_mem_record.value = usage_percent
+            # 最大値の更新（共有メモリへの書き込み）
+            if mem_percent > max_mem_record.value:
+                max_mem_record.value = mem_percent
+            
+            if cpu_percent > max_cpu_record.value:
+                max_cpu_record.value = cpu_percent
 
+            # 経過時間
             elapsed = time.time() - start_time
             elapsed_str = str(datetime.timedelta(seconds=int(elapsed)))
             
-            print(f"\r[{elapsed_str}] Memory: {usage_percent:>5.1f}% ({used_gb:>6.1f} / {total_mem_gb:.1f} GB)", end="")
+            # リアルタイム表示
+            # [時間] CPU: 100.0% | Mem: 45.0% (14.2 / 31.5 GB)
+            print(f"\r[{elapsed_str}] CPU: {cpu_percent:>5.1f}% | Mem: {mem_percent:>5.1f}% ({used_gb:>6.1f} / {total_mem_gb:.1f} GB)", end="")
             
-            if usage_percent >= MEMORY_LIMIT_PERCENT:
-                print(f"\nMonitor: 目標({MEMORY_LIMIT_PERCENT}%)に到達しました。停止信号送信。")
+            # 目標到達チェック
+            if mem_percent >= MEMORY_LIMIT_PERCENT:
+                print(f"\nMonitor: 目標メモリ({MEMORY_LIMIT_PERCENT}%)に到達しました。停止します。")
                 stop_event.set()
                 break
             
-            time.sleep(CHECK_INTERVAL)
-        except Exception:
+        except Exception as e:
+            print(f"\nMonitor Error: {e}")
             break
 
 def fibonacci_worker_safe(stop_event, total_counter, scale_counter):
     """
-    inf(無限大)を回避しながら実数で計算するプロセス
+    負荷をかけるワーカープロセス
     """
-    history = []
+    # ... (変更なし) ...
     a, b = 1.0, 1.0
-    
     local_added_count = 0
     local_scale_count = 0
     
@@ -59,81 +77,111 @@ def fibonacci_worker_safe(stop_event, total_counter, scale_counter):
         while not stop_event.is_set():
             for _ in range(BATCH_SIZE):
                 a, b = b, a + b
-                
-                # === 無限大回避ロジック ===
                 if b > THRESHOLD:
-                    # 両方の値を小さくして、比率を維持したままリセット
                     a *= SCALE_FACTOR
                     b *= SCALE_FACTOR
                     local_scale_count += 1
+                # 計算結果を保持してメモリ消費
+                # (appendは計算より遅いが、メモリを確実に食うために必要)
+                # 高速化のため、変数をリストに入れるだけに簡略化しても良いが
+                # 今回は確実に増やすためこのまま
                 
+                # リストへの追加自体を少しサボる（計算負荷重視）なら
+                # ここでリストに入れない手もあるが、メモリ目的主眼なので入れる
+            
+            # メモリ消費用リスト（ローカル変数として保持し続ける）
+            # ここでappendしないとPythonのGCで消える可能性があるため
+            # 実際にはここに global_list.extend([b]*BATCH_SIZE) 的なことをしたいが
+            # メモリ消費効率のため、この関数内で巨大リストを持つ構造にする
+            
+            # ※ 前回のコードでは history.append(b) をループ内に入れていました。
+            # ここでは再掲します。
+            pass 
+
+    except:
+        pass
+
+# ワーカー関数の再定義（前回のロジックをそのまま使用）
+def fibonacci_worker_real(stop_event, total_counter, scale_counter):
+    history = []
+    a, b = 1.0, 1.0
+    local_added = 0
+    local_scale = 0
+    
+    try:
+        while not stop_event.is_set():
+            for _ in range(BATCH_SIZE):
+                a, b = b, a + b
+                if b > THRESHOLD:
+                    a *= SCALE_FACTOR
+                    b *= SCALE_FACTOR
+                    local_scale += 1
                 history.append(b)
-            
-            local_added_count += BATCH_SIZE
-            
-            if stop_event.is_set():
-                break
-                
+            local_added += BATCH_SIZE
+            if stop_event.is_set(): break
     except MemoryError:
         stop_event.set()
-    except Exception as e:
-        print(f"Error: {e}")
+    except Exception:
+        pass
     finally:
-        # カウンタの反映
-        with total_counter.get_lock():
-            total_counter.value += local_added_count
-        with scale_counter.get_lock():
-            scale_counter.value += local_scale_count
+        with total_counter.get_lock(): total_counter.value += local_added
+        with scale_counter.get_lock(): scale_counter.value += local_scale
 
 if __name__ == "__main__":
     cpu_count = os.cpu_count()
-    num_workers = cpu_count 
     
     # 共有変数
-    total_items = multiprocessing.Value(ctypes.c_ulonglong, 0) # 生成要素数
-    scale_counts = multiprocessing.Value(ctypes.c_ulonglong, 0) # 無限大回避回数
-    max_mem_record = multiprocessing.Value('d', 0.0)           # 最大メモリ記録
+    total_items = multiprocessing.Value(ctypes.c_ulonglong, 0)
+    scale_counts = multiprocessing.Value(ctypes.c_ulonglong, 0)
+    max_mem_record = multiprocessing.Value('d', 0.0)
+    max_cpu_record = multiprocessing.Value('d', 0.0)  # CPU最大値用を追加
     
-    print(f"--- Memory Eater (Float / Infinite Avoidance Mode) ---")
+    print(f"--- StarBED Stress Test (CPU & Memory) ---")
     print(f"CPU Cores: {cpu_count}")
-    print(f"Workers  : {num_workers}")
+    print(f"Target   : {MEMORY_LIMIT_PERCENT}% Memory Usage")
     print("---------------------------------------------")
 
     stop_event = multiprocessing.Event()
     workers = []
     start_time = time.time()
     
-    for i in range(num_workers):
-        p = multiprocessing.Process(target=fibonacci_worker_safe, args=(stop_event, total_items, scale_counts))
+    # ワーカー起動
+    for i in range(cpu_count):
+        p = multiprocessing.Process(target=fibonacci_worker_real, args=(stop_event, total_items, scale_counts))
         p.start()
         workers.append(p)
     
     try:
-        memory_monitor(stop_event, start_time, max_mem_record)
+        memory_monitor(stop_event, start_time, max_mem_record, max_cpu_record)
     except KeyboardInterrupt:
-        print("\nユーザーによる中断")
+        print("\nInterrupted by User")
         stop_event.set()
     
-    print("\nStopping workers... (集計中)")
+    print("\nStopping workers... (Calculating results)")
     for p in workers:
         p.join()
         
     end_time = time.time()
     duration = end_time - start_time
     duration_str = str(datetime.timedelta(seconds=int(duration)))
-    final_mem = psutil.virtual_memory()
     
-    print("\n" + "="*40)
-    print("           RESULT SUMMARY")
-    print("="*40)
-    print(f" Execution Time   : {duration_str}")
-    print(f" Peak Memory Usage: {max_mem_record.value:.1f} %")
-# ピーク時の使用率から、GB換算値を逆算して表示（あくまで目安ですが、見た目は整合します）
-    peak_gb = (final_mem.total * (max_mem_record.value / 100)) / (1024**3)
-    print(f" Peak Memory GB   : {peak_gb:.1f} / {final_mem.total / (1024**3):.1f} GB")
-    print(f" Total Items Saved: {total_items.value:,} items")
-    print(f" Resets (Avoided inf): {scale_counts.value:,} times") # 回避回数を表示
+    # 最終的なマシンスペック情報
+    total_phys_mem_gb = psutil.virtual_memory().total / (1024**3)
+    
+    # ピーク時のメモリGB換算 (記録された最大% × 合計容量)
+    peak_mem_gb = total_phys_mem_gb * (max_mem_record.value / 100.0)
+    
+    print("\n" + "="*45)
+    print("              RESULT SUMMARY")
+    print("="*45)
+    print(f" Execution Time    : {duration_str}")
+    print(f" Peak CPU Usage    : {max_cpu_record.value:.1f} %")  # CPU結果
+    print(f" Peak Memory Usage : {max_mem_record.value:.1f} %")
+    print(f" Peak Memory (est) : {peak_mem_gb:.1f} / {total_phys_mem_gb:.1f} GB") # わかりやすいGB表示
+    print("-" * 45)
+    print(f" Total Items Gen   : {total_items.value:,}")
+    print(f" Scaling Resets    : {scale_counts.value:,}")
     if duration > 0:
-        print(f" Speed (approx)   : {total_items.value / duration:,.0f} items/sec")
-    print("="*40)
+        print(f" Throughput        : {total_items.value / duration:,.0f} items/sec")
+    print("="*45)
     print("Done.")
