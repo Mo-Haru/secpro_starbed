@@ -5,6 +5,7 @@ name = "pypi"
 
 [packages]
 psutil = "*"
+numpy = "*"
 
 [dev-packages]
 
