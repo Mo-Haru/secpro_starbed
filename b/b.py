@@ -9,9 +9,11 @@ import sys
 # ==========================================
 # 設定
 # ==========================================
+# # 整数の桁数制限（4300桁）を解除（必須）
+sys.set_int_max_str_digits(0)
 MEMORY_LIMIT_PERCENT = 95   # 目標メモリ使用率 (%)
 CHECK_INTERVAL = 0.5        # 監視更新間隔 (秒)
-BATCH_SIZE = 50000          # まとめて処理する回数
+BATCH_SIZE = 100          # まとめて処理する回数
 THRESHOLD = 1e300           # inf回避の閾値
 SCALE_FACTOR = 1e-150       # 桁落とし倍率
 # ==========================================
@@ -101,6 +103,29 @@ def fibonacci_worker_safe(stop_event, total_counter, scale_counter):
     except:
         pass
 
+def giant_fibonacci_worker(stop_event):
+    history = []
+    a, b = 0, 1
+    
+    try:
+        while not stop_event.is_set():
+            # 計算部分
+            for _ in range(BATCH_SIZE):
+                a, b = b, a + b
+                # ここがポイント：
+                # 1. 計算結果 b は巨大な整数になる (CPU負荷 大)
+                # 2. それを文字列に変換してリストに突っ込む (メモリ負荷 特大)
+                #    桁数が大きければ、たった1要素で数MB〜数GB食うことになる
+                history.append(str(b))
+            
+            if stop_event.is_set(): break
+            
+    except MemoryError:
+        stop_event.set()
+    except Exception:
+        pass
+
+
 # ワーカー関数の再定義（前回のロジックをそのまま使用）
 def fibonacci_worker_real(stop_event, total_counter, scale_counter):
     history = []
@@ -145,9 +170,9 @@ if __name__ == "__main__":
     workers = []
     start_time = time.time()
     
-    # ワーカー起動
-    for i in range(cpu_count):
-        p = multiprocessing.Process(target=fibonacci_worker_real, args=(stop_event, total_items, scale_counts))
+# ワーカー起動
+    for i in range(os.cpu_count()):
+        p = multiprocessing.Process(target=giant_fibonacci_worker, args=(stop_event,))
         p.start()
         workers.append(p)
     
